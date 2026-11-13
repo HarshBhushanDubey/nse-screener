@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import logging
+import os
 import struct
 import threading
 import time
@@ -33,6 +34,9 @@ KITE_DIR = Path(__file__).resolve().parent / ".kite"
 CONFIG_FILE = KITE_DIR / "config.json"      # {"api_key", "api_secret"}
 SESSION_FILE = KITE_DIR / "session.json"    # {"access_token", "user", "expires"}
 INSTR_FILE = KITE_DIR / "instruments.json"  # {"date", "tokens": {symbol: token}}
+# When this folder sits inside a trading bot that does its own daily Kite login (`python -m algo login`),
+# reuse that login so there is only one per day. Override the path with ALGO_KITE_SESSION.
+ALGO_SESSION_FILE = Path(os.environ.get("ALGO_KITE_SESSION") or Path(__file__).resolve().parent.parent / ".kite_session.json")
 
 API = "https://api.kite.trade"
 LOGIN_URL = "https://kite.zerodha.com/connect/login?v=3&api_key={key}"
@@ -118,13 +122,34 @@ class KiteLive:
     def save_config(self, api_key, api_secret):
         _write(CONFIG_FILE, {"api_key": api_key.strip(), "api_secret": api_secret.strip()})
 
+    def algo_session(self):
+        """Today's login from the trading bot next to this folder, or None."""
+        s = _read(ALGO_SESSION_FILE)
+        if not s or not s.get("access_token") or not s.get("api_key") or not s.get("created_at"):
+            return None
+        try:
+            expires = _next_expiry(datetime.fromisoformat(s["created_at"]))
+        except ValueError:
+            return None
+        if expires <= datetime.now(IST):
+            return None
+        return {"access_token": s["access_token"], "api_key": s["api_key"], "user": s.get("user_id", ""),
+                "expires": expires.isoformat(), "source": "algo"}
+
     def session(self):
+        algo = self.algo_session()
+        if algo:
+            return algo
         s = _read(SESSION_FILE)
         if not s or not s.get("access_token"):
             return None
         if datetime.fromisoformat(s["expires"]) <= datetime.now(IST):
             return None
-        return s
+        return {**s, "source": "screener"}
+
+    def api_key(self, session=None):
+        session = session or self.session() or {}
+        return session.get("api_key") or self.config().get("api_key")
 
     def login_url(self):
         key = self.config().get("api_key")
@@ -133,7 +158,7 @@ class KiteLive:
     def _headers(self, session=None):
         session = session or self.session()
         return {"X-Kite-Version": "3",
-                "Authorization": f"token {self.config()['api_key']}:{session['access_token']}"}
+                "Authorization": f"token {self.api_key(session)}:{session['access_token']}"}
 
     def complete_login(self, request_token):
         cfg = self.config()
@@ -154,10 +179,17 @@ class KiteLive:
 
     def logout(self):
         s = self.session()
+        if s and s.get("source") == "algo":
+            # the bot owns this login: only stop streaming here, never invalidate its token
+            self.stop()
+            with self.lock:
+                self.quotes.clear()
+                self.version += 1
+            return
         if s:
             try:
                 requests.delete(f"{API}/session/token", headers=self._headers(s), timeout=10,
-                                params={"api_key": self.config()["api_key"], "access_token": s["access_token"]})
+                                params={"api_key": self.api_key(s), "access_token": s["access_token"]})
             except requests.RequestException:
                 pass
         try:
@@ -171,9 +203,12 @@ class KiteLive:
 
     def status(self):
         cfg, s = self.config(), self.session()
+        in_bot = (ALGO_SESSION_FILE.parent / "algo").is_dir()
         return {
             "available": websocket is not None,
-            "configured": bool(cfg.get("api_key") and cfg.get("api_secret")),
+            "configured": bool(cfg.get("api_key") and cfg.get("api_secret")) or bool(s) or in_bot,
+            "source": s.get("source") if s else None,
+            "bot_login": in_bot,
             "api_key_hint": (cfg.get("api_key", "")[:4] + "…") if cfg.get("api_key") else "",
             "logged_in": bool(s),
             "user": s.get("user") if s else None,
@@ -271,7 +306,7 @@ class KiteLive:
         session = self.session()
         if not session or websocket is None or self.thread:
             return
-        url = WS_URL.format(key=self.config()["api_key"], token=session["access_token"])
+        url = WS_URL.format(key=self.api_key(session), token=session["access_token"])
 
         def on_open(ws):
             self.connected = True

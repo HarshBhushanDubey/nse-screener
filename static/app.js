@@ -913,7 +913,9 @@
     $('#kiteInfo').hidden = !info;
     $('#kiteMsg').textContent = s.available === false ? 'Live streaming needs the websocket-client package: run  .venv/bin/python -m pip install -r requirements.txt' : '';
     if (info) {
-      $('#kiteInfoText').textContent = `Logged in to Kite as ${s.user}. Prices and signals update live every 2 seconds `
+      $('#kiteLogout').textContent = s.source === 'algo' ? 'Stop live prices' : 'Log out of Kite';
+      $('#kiteChangeKeys').hidden = s.source === 'algo';
+      $('#kiteInfoText').textContent = `Logged in to Kite as ${s.user}${s.source === 'algo' ? ' through your trading bot' : ''}. Prices and signals update live every 2 seconds `
         + `until the session ends at ${new Date(s.expires).toLocaleString('en-IN', { weekday: 'short', hour: 'numeric', minute: '2-digit' })} (Kite asks for a fresh login each day).`
         + (s.error ? ` Last message from Kite: ${s.error}` : '');
     }
@@ -922,6 +924,10 @@
 
   $('#kiteBtn').addEventListener('click', () => {
     const s = live.status || {};
+    if (s.bot_login && !s.logged_in) {
+      toast('Log in once with your bot: .venv/bin/python -m algo login (the screener uses the same login).');
+      return;
+    }
     if (s.configured && !s.logged_in) { location.href = 'kite/login'; return; }
     openKiteDialog();
   });
