@@ -462,6 +462,35 @@ def _run_scan(scan: Scan):
 
 
 # --------------------------------------------------------------------------
+# candles for one index on one timeframe (used by the Breakout watch view)
+
+_candle_cache: Dict[str, dict] = {}
+
+
+def candles(uid, tf) -> Dict[str, dict]:
+    """{symbol: tf_payload} for every stock in an index, cached per timeframe."""
+    key = f"{uid}:{tf}"
+    hit = _candle_cache.get(key)
+    if hit and time.time() - hit["t"] < TIMEFRAMES[tf]["ttl"]:
+        return hit["data"]
+    scan = get_scan(uid, tf)
+    if scan and scan.state == "done":
+        with scan.lock:
+            data = {r["symbol"]: r["tfd"] for r in scan.stocks.values() if r.get("tfd")}
+    else:
+        spec = TIMEFRAMES[tf]
+        ysyms = [m["symbol"] + ".NS" for m in universes.load(uid)]
+        data = {}
+        for _, batch, frames in _batched_download(ysyms, spec["interval"], spec["period"]):
+            for ysym in batch:
+                payload = tf_payload(_frame_for(frames, ysym), tf)
+                if payload:
+                    data[ysym[:-3]] = payload
+    _candle_cache[key] = {"t": time.time(), "data": data}
+    return data
+
+
+# --------------------------------------------------------------------------
 # single-stock lookup (for stocks outside the selected index)
 
 _lookup_cache: Dict[str, dict] = {}

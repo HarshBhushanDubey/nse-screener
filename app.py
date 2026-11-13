@@ -63,6 +63,15 @@ def api_scan_status(uid):
     return jsonify(scan.snapshot(since=request.args.get("since", default=-1, type=int)))
 
 
+@app.get("/api/candles")
+def api_candles():
+    uid = request.args.get("universe", "niftylargemidcap250")
+    tf = _tf(request.args.get("tf", "1d"))
+    if uid not in universes.LISTED or tf is None:
+        return jsonify(error="Unknown index or timeframe"), 400
+    return jsonify(screener.candles(uid, tf))
+
+
 @app.get("/api/lookup")
 def api_lookup():
     q = request.args.get("q", "").strip()

@@ -106,6 +106,7 @@
       <h2>Results</h2>
       <div class="segmented" id="viewSwitch" role="group" aria-label="Results view">
         <button type="button" data-view="split">Buy &amp; Sell lists</button>
+        <button type="button" data-view="watch">Breakout watch</button>
         <button type="button" data-view="table">Full table</button>
       </div>
       <span id="viewNote" class="hint"></span>
@@ -131,6 +132,34 @@
           <label class="check"><input type="checkbox" data-strong="sell"> Strong Sell only</label>
         </div>
         <ul class="frame-list" id="sellList"></ul>
+      </div>
+    </section>
+
+    <section id="watchView" class="watch" aria-label="Breakout watch" hidden>
+      <div class="watch-head">
+        <span class="toolbar-label">Timeframes</span>
+        <div id="watchTfs" class="chips" role="group" aria-label="Timeframes to check"></div>
+        <span id="watchNote" class="hint"></span>
+      </div>
+      <div class="split">
+        <div class="frame frame-buy">
+          <div class="frame-head">
+            <div>
+              <h3 class="frame-title"><span class="arr up" aria-hidden="true">▲</span>About to break out <span class="n" id="upCount"></span></h3>
+              <div class="frame-sub">In a tight range, trading near the top of it</div>
+            </div>
+          </div>
+          <ul class="frame-list" id="upList"></ul>
+        </div>
+        <div class="frame frame-sell">
+          <div class="frame-head">
+            <div>
+              <h3 class="frame-title"><span class="arr down" aria-hidden="true">▼</span>About to break down <span class="n" id="downCount"></span></h3>
+              <div class="frame-sub">In a tight range, trading near the bottom of it</div>
+            </div>
+          </div>
+          <ul class="frame-list" id="downList"></ul>
+        </div>
       </div>
     </section>
 

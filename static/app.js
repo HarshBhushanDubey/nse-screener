@@ -181,6 +181,7 @@
     nearHigh: 5, nearLow: 5, volSpike: 1.5,
     maxPE: 20, maxPB: 3, minROE: 15, maxDE: 1,
     pivotWithin: 1, rangeLookback: 20, rangeWithin: 3, maxRangeWidth: 0,
+    squeezeRatio: 0.8, nearEdge: 20,
     strongAt: 3,
   };
   const RULE_GROUPS = [
@@ -190,6 +191,7 @@
     { name: 'Value', color: 'var(--s4)', fields: [['maxPE', 'Max P/E', 1], ['maxPB', 'Max P/B', 0.1], ['minROE', 'Min ROE %', 1], ['maxDE', 'Max debt / equity', 0.1]] },
     { name: 'Pivot Cross', color: 'var(--s5)', fields: [['pivotWithin', 'Cross within last N candles (1–10)', 1]] },
     { name: 'Range Breakout', color: 'var(--s6)', fields: [['rangeLookback', 'Range length (5–50 candles)', 1], ['rangeWithin', 'Breakout within last N candles (1–10)', 1], ['maxRangeWidth', 'Max range width % (0 = any)', 0.5]] },
+    { name: 'Breakout watch', color: 'var(--s6)', fields: [['squeezeRatio', 'Tight range: at most × usual width', 0.05], ['nearEdge', 'Near edge: within top / bottom % of range', 5]] },
     { name: 'Signal score', color: 'var(--axis)', fields: [['strongAt', 'Strong Buy / Sell at score ±', 1]] },
   ];
 
@@ -428,7 +430,8 @@
     mode: store.get('mode', 'all') === 'any' ? 'any' : 'all',
     rules: Object.assign({}, DEFAULT_RULES, store.get('rules', {})),
     sort: savedSort && savedSort.key ? savedSort : { key: 'signal', dir: -1 },
-    view: store.get('view', 'split') === 'table' ? 'table' : 'split',
+    view: ['split', 'watch', 'table'].includes(store.get('view', 'split')) ? store.get('view', 'split') : 'split',
+    watchTfs: store.get('watchTfs', ['15m', '1h', '1d', '1wk']),
     strongOnly: Object.assign({ buy: false, sell: false }, store.get('strongOnly', {})),
     query: '',
     flash: null,
@@ -674,14 +677,15 @@
     else if (total) text = filtersActive() ? `${rows.length} of ${total} ${capText} stocks match your filters` : `Showing all ${total} ${capText} stocks`;
     $('#count').textContent = text;
 
-    const split = state.view === 'split' && !q;
-    $('#splitView').hidden = !split;
-    $('#tableView').hidden = split;
-    document.querySelectorAll('#viewSwitch button').forEach((b) =>
-      b.setAttribute('aria-pressed', String(b.dataset.view === (q ? 'table' : state.view))));
+    const view = q ? 'table' : state.view;
+    $('#splitView').hidden = view !== 'split';
+    $('#watchView').hidden = view !== 'watch';
+    $('#tableView').hidden = view !== 'table';
+    document.querySelectorAll('#viewSwitch button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.view === view)));
     $('#viewNote').textContent = q ? 'Search results are shown in the full table.'
-      : split ? 'Hold stocks appear only in the full table.' : '';
-    if (split) renderSplit([...pinRows, ...rows], loading);
+      : view === 'split' ? 'Hold stocks appear only in the full table.' : '';
+    if (view === 'split') renderSplit([...pinRows, ...rows], loading);
+    if (view === 'watch') renderWatch(rows, loading);
 
     if (state.flash) {
       const tr = tbody.querySelector(`tr[data-ysym="${CSS.escape(state.flash)}"]`);
@@ -797,10 +801,140 @@
     }
   }
 
+  // ------------------------------------------------------------ breakout watch
+  const WATCH_ALL = ['15m', '1h', '1d', '1wk'];
+  const watch = { data: {}, loading: new Set(), key: '' };
+  const tfInfo = (id) => state.timeframes.find((t) => t.id === id) || { id, label: id, short: id };
+
+  async function loadCandles(tf) {
+    if (STATIC.on) {
+      await staticLoad(false);
+      if (tf === '1d') return Object.fromEntries(Object.entries(STATIC.stocks).filter(([, r]) => r.tfd).map(([sym, r]) => [sym, r.tfd]));
+      if (!STATIC.tf[tf]) STATIC.tf[tf] = await getJSON(`data/tf-${tf}.json?v=${encodeURIComponent(STATIC.meta.updated)}`);
+      return STATIC.tf[tf];
+    }
+    return api(`/api/candles?universe=${encodeURIComponent(state.universe)}&tf=${encodeURIComponent(tf)}`);
+  }
+
+  function ensureWatchData() {
+    const key = STATIC.on ? 'static' : state.universe;
+    if (watch.key !== key) { watch.data = {}; watch.key = key; }
+    for (const tf of state.watchTfs) {
+      if (watch.data[tf] || watch.loading.has(tf)) continue;
+      watch.loading.add(tf);
+      loadCandles(tf)
+        .then((m) => { if (watch.key === key) watch.data[tf] = m || {}; })
+        .catch(() => { if (watch.key === key) watch.data[tf] = {}; })
+        .finally(() => { watch.loading.delete(tf); render(); });
+    }
+  }
+
+  /** A stock "in a range" whose price is near the top (dir +1) or bottom (dir -1) of it. */
+  function rangeSetup(t, R) {
+    if (!t || !t.c) return null;
+    const { h, l, c } = t;
+    const n = c.length;
+    const N = clamp(R.rangeLookback, 5, Math.floor((n - 1) / 2));
+    const win = (end) => {
+      let hi = -Infinity, lo = Infinity;
+      for (let j = end - N; j < end; j++) {
+        if (h[j] == null || l[j] == null) return null;
+        if (h[j] > hi) hi = h[j];
+        if (l[j] < lo) lo = l[j];
+      }
+      return { hi, lo };
+    };
+    const cur = win(n - 1);
+    const price = c[n - 1];
+    if (!cur || price == null || cur.lo <= 0 || cur.hi <= cur.lo) return null;
+    if (price > cur.hi || price < cur.lo) return null;            // already broken out / down
+    const widths = [];
+    for (let i = N; i <= n - 1 - N; i++) { const w = win(i); if (w) widths.push((w.hi - w.lo) / w.lo); }
+    if (widths.length < 3) return null;
+    widths.sort((a, b) => a - b);
+    const width = (cur.hi - cur.lo) / cur.lo;
+    const ratio = width / widths[Math.floor(widths.length / 2)];
+    if (ratio > R.squeezeRatio) return null;                      // not tighter than usual
+    const pos = (price - cur.lo) / (cur.hi - cur.lo);
+    const edge = R.nearEdge / 100;
+    const base = { hi: cur.hi, lo: cur.lo, width: width * 100, ratio, price, last: t.last, N };
+    if (pos >= 1 - edge) return { ...base, dir: 1, dist: (cur.hi - price) / price * 100 };
+    if (pos <= edge) return { ...base, dir: -1, dist: (price - cur.lo) / price * 100 };
+    return null;
+  }
+
+  function watchItem(it, dir) {
+    const r = it.r;
+    const chg = r.change_pct;
+    const chips = it.hits.map((x) => {
+      const T = tfInfo(x.tf);
+      const tip = `${T.label} chart: the last ${x.N} candles traded between ${inr(x.lo)} and ${inr(x.hi)} `
+        + `(${num(x.width)}% wide, ${num(x.ratio * 100, 0)}% of its usual width). Price ${inr(x.price)} is ${num(x.dist, 2)}% `
+        + (dir > 0 ? `below the top: a close above ${inr(x.hi)} would be a breakout.` : `above the bottom: a close below ${inr(x.lo)} would be a breakdown.`)
+        + ` As of ${x.last}.`;
+      return `<span class="tag" tabindex="0" style="--c:var(--s6)" data-tip="${esc(tip)}">${dir > 0 ? UP : DOWN}<b>${esc(T.short)}</b>&nbsp;${num(x.dist, 2)}% to ${dir > 0 ? inr(x.hi) : inr(x.lo)}</span>`;
+    }).join('');
+    return `<li class="fi" data-ysym="${esc(r.ysym)}">
+      <div class="fi-top">
+        <span class="fi-name">${symLink(r)}<span class="co">${esc(r.name)}</span>${capChip(r)}</span>
+        ${it.e.level ? sigHTML(it.e) : ''}
+        <span class="fi-price">${inr(r.price)} <span class="${chg > 0 ? 'up' : chg < 0 ? 'down' : ''}">${signed(chg, 2)}</span></span>
+      </div>
+      <div class="tags">${chips}</div>
+    </li>`;
+  }
+
+  function renderWatch(items, loading) {
+    state.watchTfs = state.watchTfs.filter((tf) => WATCH_ALL.includes(tf));
+    if (!state.watchTfs.length) state.watchTfs = [...WATCH_ALL];
+    ensureWatchData();
+    const R = state.rules;
+    $('#watchTfs').innerHTML = WATCH_ALL.map((tf) =>
+      `<button type="button" data-tf="${tf}" aria-pressed="${state.watchTfs.includes(tf)}">${esc(tfInfo(tf).label)}</button>`).join('');
+    const pending = state.watchTfs.filter((tf) => !watch.data[tf]);
+    $('#watchNote').textContent = pending.length
+      ? `Loading ${pending.map((tf) => tfInfo(tf).label.toLowerCase()).join(', ')} candles…`
+      : `Range = the last ${R.rangeLookback} candles; tight = at most ${Math.round(R.squeezeRatio * 100)}% of its usual width; near = in the top or bottom ${R.nearEdge}% of the range.`;
+    const up = [], down = [];
+    for (const it of items) {
+      const hits = [];
+      for (const tf of state.watchTfs) {
+        const setup = rangeSetup(watch.data[tf] && watch.data[tf][it.r.symbol], R);
+        if (setup) hits.push({ tf, ...setup });
+      }
+      for (const [dir, list] of [[1, up], [-1, down]]) {
+        const mine = hits.filter((x) => x.dir === dir);
+        if (mine.length) list.push({ ...it, hits: mine, best: Math.min(...mine.map((x) => x.dist)) });
+      }
+    }
+    const order = (a, b) => b.hits.length - a.hits.length || a.best - b.best;
+    const busy = loading || (pending.length === state.watchTfs.length);
+    const bones = '<li><span class="bone"></span><span class="bone" style="width:70%"></span><span class="bone" style="width:80%"></span></li>';
+    for (const [id, list, dir, word] of [['up', up, 1, 'breakout'], ['down', down, -1, 'breakdown']]) {
+      list.sort(order);
+      $(`#${id}Count`).textContent = busy ? '' : `(${list.length})`;
+      $(`#${id}List`).innerHTML = busy ? bones
+        : list.length ? list.map((it) => watchItem(it, dir)).join('')
+        : `<li class="frame-empty">No stock is in a tight range near its ${dir > 0 ? 'top' : 'bottom'} on these timeframes. Loosen the Breakout watch rules or add timeframes.</li>`;
+    }
+  }
+
+  $('#watchTfs').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-tf]');
+    if (!b) return;
+    const tf = b.dataset.tf;
+    const on = state.watchTfs.includes(tf);
+    if (on && state.watchTfs.length === 1) return;               // keep at least one timeframe
+    state.watchTfs = on ? state.watchTfs.filter((x) => x !== tf) : WATCH_ALL.filter((x) => x === tf || state.watchTfs.includes(x));
+    store.set('watchTfs', state.watchTfs);
+    render();
+  });
+
   // ------------------------------------------------------------ scanning
   async function startScan(force = false) {
     clearTimeout(state.pollTimer);
     const token = ++state.pollToken;
+    if (force) watch.data = {};
     if (STATIC.on) return staticScan(token, force);
     try {
       const meta = await api('/api/scan', { method: 'POST', body: JSON.stringify({ universe: state.universe, tf: state.tf, force }) });
@@ -1016,7 +1150,7 @@
     showTooltip(`<b>${inr(c[i])}</b> · ${esc(fmtDate(r.spark.d[i]))}<br>6-month change ${esc(signed(sinceStart))}`, e.clientX, e.clientY);
   }
 
-  for (const rowsEl of [$('#rows'), $('#splitView')]) {
+  for (const rowsEl of [$('#rows'), $('#splitView'), $('#watchView')]) {
     rowsEl.addEventListener('pointermove', (e) => {
       const svg = e.target.closest('.spark');
       if (svg) { sparkHover(svg, e); return; }
