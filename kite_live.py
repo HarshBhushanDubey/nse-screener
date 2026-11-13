@@ -102,6 +102,7 @@ class KiteLive:
         self.quotes = {}          # symbol -> quote dict
         self.version = 0
         self.tokens = {}          # symbol -> instrument token
+        self.ticks = {}           # symbol -> tick size (minimum price step)
         self.by_token = {}        # token -> symbol
         self.wanted = set()       # tokens we want streamed
         self.ws = None
@@ -186,18 +187,20 @@ class KiteLive:
     def _load_instruments(self, session):
         today = datetime.now(IST).date().isoformat()
         cached = _read(INSTR_FILE)
-        if cached and cached.get("date") == today:
-            tokens = cached["tokens"]
+        if cached and cached.get("date") == today and "ticks" in cached:
+            tokens, ticks = cached["tokens"], cached["ticks"]
         else:
             resp = requests.get(f"{API}/instruments/NSE", headers=self._headers(session), timeout=60)
             resp.raise_for_status()
-            tokens = {}
+            tokens, ticks = {}, {}
             for row in csv.DictReader(io.StringIO(resp.text)):
                 if row.get("segment") == "NSE" and row.get("instrument_type") == "EQ":
                     tokens[row["tradingsymbol"]] = int(row["instrument_token"])
-            _write(INSTR_FILE, {"date": today, "tokens": tokens})
+                    ticks[row["tradingsymbol"]] = float(row.get("tick_size") or 0.05)
+            _write(INSTR_FILE, {"date": today, "tokens": tokens, "ticks": ticks})
         with self.lock:
             self.tokens = tokens
+            self.ticks = ticks
             self.by_token = {t: s for s, t in tokens.items()}
 
     def _snapshot(self, symbols, session):
@@ -333,12 +336,54 @@ class KiteLive:
         self.thread = None
         self.start()
 
+    # ---------------------------------------------------------------- REST helpers for algos
+    def request(self, method, path, **kwargs):
+        """Call the Kite REST API with today's session; returns the `data` field or raises KiteError."""
+        session = self.session()
+        if not session:
+            raise KiteError("Not logged in to Kite today. Open http://127.0.0.1:8000 and click Log in to Kite.")
+        resp = requests.request(method, f"{API}{path}", headers=self._headers(session), timeout=20, **kwargs)
+        try:
+            body = resp.json()
+        except ValueError:
+            raise KiteError(f"Kite returned {resp.status_code}: {resp.text[:200]}")
+        if resp.status_code != 200 or body.get("status") != "success":
+            raise KiteError(body.get("message") or f"Kite error {resp.status_code}")
+        return body.get("data")
+
+    def quotes(self, symbols):
+        """{symbol: {ltp, open, high, low, close, change_pct}} straight from Kite (REST, 500 per call)."""
+        out = {}
+        symbols = list(dict.fromkeys(symbols))
+        for i in range(0, len(symbols), 500):
+            if i:
+                time.sleep(1.1)  # quote API allows about 1 request per second
+            data = self.request("GET", "/quote/ohlc", params=[("i", f"NSE:{s}") for s in symbols[i:i + 500]]) or {}
+            for key, q in data.items():
+                ohlc = q.get("ohlc") or {}
+                ltp, close = q.get("last_price"), ohlc.get("close")
+                out[key.split(":", 1)[1]] = {
+                    "ltp": ltp, "open": ohlc.get("open"), "high": ohlc.get("high"), "low": ohlc.get("low"),
+                    "close": close, "change_pct": round((ltp / close - 1) * 100, 2) if ltp and close else None,
+                }
+        return out
+
+    def tick_size(self, symbol):
+        session = self.session()
+        if session and not self.ticks:
+            self._load_instruments(session)
+        return self.ticks.get(symbol, 0.05)
+
     def snapshot(self, symbols, since=-1):
         with self.lock:
             return {
                 "version": self.version,
                 "quotes": {s: q for s in symbols if (q := self.quotes.get(s)) and q["v"] > since},
             }
+
+
+class KiteError(RuntimeError):
+    """An error message from Kite (login expired, IP not whitelisted, order rejected, ...)."""
 
 
 kite = KiteLive()

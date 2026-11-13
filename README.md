@@ -74,6 +74,41 @@ The key, secret and daily token are stored only in `.kite/` on this Mac (git-ign
 your user). Exchange rules don't allow passing Kite data on to others, so live prices are shown only to
 a browser on this Mac: never on the public GitHub Pages site or to visitors of a `./share.sh` link.
 
+## Use it from your own algo (Python)
+
+Put your algo file in this folder (or add the folder to `sys.path`) and import:
+
+```python
+from signals import signals, buy_list, sell_list, breakout_watch, market_open
+from trader import KiteTrader, OrderRejected
+
+buys = buy_list(universe="niftylargemidcap250", timeframe="15m", strong_only=True)
+for s in buys:
+    print(s["symbol"], s["label"], s["score"], s["price"], [r["label"] for r in s["reasons"]])
+
+watch = breakout_watch(timeframes=("15m", "1h", "1d", "1wk"))   # {"breakout": [...], "breakdown": [...]}
+
+trader = KiteTrader(live=False, product="MIS", max_order_value=10_000, max_orders_per_day=10)
+trader.buy("INFY", 5)        # LIMIT order 0.5% above the live price (paper mode: logged, not sent)
+trader.sell("INFY", 5)
+print(trader.positions())
+```
+
+* `signals()` returns every stock with `level` (strongbuy / buy / hold / sell / strongsell), `score`,
+  `price` and `reasons` (each strategy that fired). It uses the same rules as the website; pass
+  `rules={...}` to change thresholds (see `DEFAULT_RULES` in `signals.py`).
+* When you are logged in to Kite today, prices are live Kite prices and every signal is recalculated.
+* `KiteTrader(live=False)` is **paper mode** (orders logged to `.kite/paper_orders.jsonl`). With
+  `live=True` it places real orders through the Kite order API, with limits on order value, orders per
+  day and market hours.
+* `example_algo.py` is a complete template (Strong Buy entries, exits on Sell signals and at 15:10).
+  Run `python example_algo.py --once` to test it in paper mode.
+
+**Live orders need two things:** today's Kite login (click *Log in to Kite* on the local site) and a
+**static IP whitelisted** in your Kite Connect developer account; since 1 April 2026 SEBI/NSE rules
+reject API orders from any other IP. A normal home connection usually has a changing IP, so get a
+static IP from your internet provider or run the algo on a server with one.
+
 ## FII & DII Buying
 
 The **FII & DII Buying** button at the top right opens Moneycontrol's
