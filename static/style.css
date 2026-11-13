@@ -170,7 +170,7 @@ h1 { font-size: 22px; line-height: 1.2; margin: 0; letter-spacing: -0.01em; }
 /* ---------- controls ---------- */
 .controls {
   display: grid;
-  grid-template-columns: 270px 130px minmax(0, 1fr) auto;
+  grid-template-columns: 300px 130px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: end;
   margin-top: 20px;
