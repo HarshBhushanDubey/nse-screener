@@ -167,6 +167,36 @@ h1 { font-size: 22px; line-height: 1.2; margin: 0; letter-spacing: -0.01em; }
 .nav-link .ext { width: 13px; height: 13px; margin-left: 4px; vertical-align: -1px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
+/* ---------- Kite ---------- */
+.kite-btn {
+  height: 38px; display: inline-flex; align-items: center; gap: 8px; padding: 0 14px;
+  border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface);
+  font-weight: 600; color: var(--ink-2); cursor: pointer; white-space: nowrap;
+}
+.kite-btn:hover { background: var(--surface-2); }
+.kite-btn .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--axis); }
+.kite-btn.on { color: var(--ink); }
+.kite-btn.on .dot { background: var(--up); box-shadow: 0 0 0 3px var(--buy-wash); }
+.kite-dialog {
+  border: 1px solid var(--border-strong); border-radius: 12px; background: var(--surface); color: var(--ink);
+  padding: 20px 22px; width: min(520px, calc(100vw - 32px)); box-shadow: var(--shadow);
+}
+.kite-dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+.kite-dialog h2 { font-size: 17px; margin: 0 0 10px; }
+.kite-form { display: flex; flex-direction: column; gap: 12px; }
+.kite-form p { margin: 0; color: var(--ink-2); }
+.kite-form a { color: var(--accent-ink); }
+.kite-form label { display: flex; flex-direction: column; gap: 5px; font-weight: 600; font-size: 13px; color: var(--ink-2); }
+.kite-form input { height: 40px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--page); padding: 0 12px; font-weight: 400; color: var(--ink); }
+.dialog-actions { display: flex; justify-content: flex-end; align-items: center; gap: 14px; flex-wrap: wrap; }
+.kite-msg { font-size: 13px; color: var(--down); }
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 60;
+  background: var(--ink); color: var(--surface); padding: 10px 16px; border-radius: 8px; box-shadow: var(--shadow);
+  max-width: calc(100vw - 32px);
+}
+.live-tag { font-size: 10px; font-weight: 700; letter-spacing: .04em; color: var(--up); margin-left: 4px; vertical-align: 1px; }
+
 /* ---------- controls ---------- */
 .controls {
   display: grid;

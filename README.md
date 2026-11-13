@@ -57,6 +57,23 @@ Then open <http://127.0.0.1:8000>. (Set `PORT=8080` before the command to use an
 - **Adjust strategy rules**: change thresholds; results update instantly.
 - Hover a strategy tag for the exact numbers behind it, or the 6-month sparkline for prices by date.
 
+## Live prices from Zerodha Kite (on your Mac only)
+
+The local app can stream real-time prices from your own Kite Connect account. Every signal (MA trend,
+RSI, 52-week high/low, pivot cross, range breakout, Breakout watch) is recalculated with the live price
+about every 2 seconds, and live prices are marked **LIVE**.
+
+1. Subscribe to a **Kite Connect** app at <https://developers.kite.trade> (the paid *Connect* plan,
+   ₹500/month; the free *Personal* plan has no market data).
+2. In the app settings set the **Redirect URL** to `http://127.0.0.1:8000/kite/callback`.
+3. Start the app (`.venv/bin/python app.py`), open <http://127.0.0.1:8000>, click **Connect Kite**,
+   paste the API key and secret, then log in on Zerodha's page.
+4. Kite sessions end at 6:00 am; click **Log in to Kite** once each day.
+
+The key, secret and daily token are stored only in `.kite/` on this Mac (git-ignored, readable only by
+your user). Exchange rules don't allow passing Kite data on to others, so live prices are shown only to
+a browser on this Mac: never on the public GitHub Pages site or to visitors of a `./share.sh` link.
+
 ## FII & DII Buying
 
 The **FII & DII Buying** button at the top right opens Moneycontrol's

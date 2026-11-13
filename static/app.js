@@ -544,7 +544,7 @@
       </td>
       <td class="sig-cell">${signalBadge(e)}</td>
       <td>${sparkSVG(r)}</td>
-      <td>${r.price == null ? '<span class="na">—</span>' : inr(r.price)}</td>
+      <td>${r.price == null ? '<span class="na">—</span>' : inr(r.price)}${r.live ? '<span class="live-tag" title="Live price from Kite">LIVE</span>' : ''}</td>
       <td class="${chgCls}">${signed(r.change_pct, 2)}</td>
       <td>${num(r.rsi)}</td>
       <td class="${v2 > 0 ? 'up' : v2 < 0 ? 'down' : ''}">${signed(v2)}</td>
@@ -627,7 +627,8 @@
   }
 
   function evalAll(records) {
-    return records.map((r) => {
+    return records.map((r0) => {
+      const r = withLive(r0);
       const e = evaluate(r, state.rules);
       e.pendingFund = r.fund_status === 'pending';
       e.pendingTf = r.price != null && (r.tf !== state.tf || r.tf_status === 'pending');
@@ -797,9 +798,157 @@
       el.textContent = `${s.label}: ${s.count} stocks, updated ${time}`
         + (asOf ? ` (latest session ${fmtDate(asOf)})` : '')
         + (missing ? `. ${missing} without price data.` : '.')
-        + (STATIC.on ? ' Data refreshes about every 15 minutes during market hours.' : '');
+        + (STATIC.on ? ' Data refreshes about every 15 minutes during market hours.' : '')
+        + (live.on && live.lastUpdate ? ` Live prices from Kite, last update ${new Date(live.lastUpdate).toLocaleTimeString('en-IN')}.` : '');
     }
   }
+
+  // ------------------------------------------------------------ Zerodha Kite live prices (owner's Mac only)
+  const live = { on: false, version: -1, quotes: {}, timer: null, status: null, lastUpdate: null };
+
+  const lastSet = (arr, v) => { const a = arr.slice(); a[a.length - 1] = v; return a; };
+  function patchCandles(t, ltp) {
+    if (!t || !t.c || !t.c.length || ltp == null) return t;
+    const n = t.c.length;
+    return { ...t, c: lastSet(t.c, ltp), h: lastSet(t.h, Math.max(t.h[n - 1] ?? ltp, ltp)), l: lastSet(t.l, Math.min(t.l[n - 1] ?? ltp, ltp)) };
+  }
+
+  function rsiOf(closes, period = 14) {
+    const v = closes.filter((x) => x != null);
+    if (v.length <= period + 1) return null;
+    let g = 0, l = 0;
+    for (let i = 1; i <= period; i++) { const d = v[i] - v[i - 1]; if (d > 0) g += d; else l -= d; }
+    g /= period; l /= period;
+    for (let i = period + 1; i < v.length; i++) {
+      const d = v[i] - v[i - 1];
+      g = (g * (period - 1) + Math.max(d, 0)) / period;
+      l = (l * (period - 1) + Math.max(-d, 0)) / period;
+    }
+    return l === 0 ? 100 : Math.round((100 - 100 / (1 + g / l)) * 10) / 10;
+  }
+
+  /** The record with Kite's live price folded into every price-based number. */
+  function withLive(r) {
+    const q = live.on && live.quotes[r.symbol];
+    if (!q || q.ltp == null || r.price == null) return r;
+    const ltp = q.ltp;
+    const out = { ...r, price: ltp, live: true };
+    if (q.change_pct != null) out.change_pct = q.change_pct;
+    if (r.high52 != null) { out.high52 = Math.max(r.high52, q.high ?? ltp, ltp); out.pct_from_high = (ltp / out.high52 - 1) * 100; }
+    if (r.low52 != null) { out.low52 = Math.min(r.low52, q.low ?? ltp, ltp); out.pct_from_low = (ltp / out.low52 - 1) * 100; }
+    if (r.spark && r.spark.c && r.spark.c.length) {
+      const c = lastSet(r.spark.c, ltp);
+      out.spark = { ...r.spark, c };
+      const rv = rsiOf(c);
+      if (rv != null) out.rsi = rv;
+    }
+    if (r.tfd) out.tfd = patchCandles(r.tfd, ltp);
+    return out;
+  }
+
+  function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => { t.hidden = true; }, 7000);
+  }
+
+  function renderKiteBtn() {
+    const b = $('#kiteBtn');
+    const s = live.status;
+    if (STATIC.on || !s || !s.local) { b.hidden = true; return; }
+    b.hidden = false;
+    let text = 'Kite connecting…', on = false;
+    if (!s.available) text = 'Kite unavailable';
+    else if (!s.configured) text = 'Connect Kite';
+    else if (!s.logged_in) text = 'Log in to Kite';
+    else if (s.streaming || live.lastUpdate) { text = 'Kite live'; on = true; }
+    b.classList.toggle('on', on);
+    b.innerHTML = `<span class="dot" aria-hidden="true"></span>${esc(text)}`;
+    b.title = s.logged_in ? `Live prices from Kite (${s.user}). Session ends ${new Date(s.expires).toLocaleString('en-IN', { weekday: 'short', hour: 'numeric', minute: '2-digit' })}.`
+      : 'Show live prices from your Zerodha Kite Connect account';
+  }
+
+  async function pollLive() {
+    clearTimeout(live.timer);
+    if (!live.on) return;
+    try {
+      const res = await api('/api/live', { method: 'POST', body: JSON.stringify({
+        universe: state.universe, extra: [...state.lookups.values()].map((r) => r.symbol), since: live.version }) });
+      live.status = { ...live.status, ...res, local: true };
+      const n = Object.keys(res.quotes || {}).length;
+      Object.assign(live.quotes, res.quotes || {});
+      live.version = res.version;
+      if (n) live.lastUpdate = Date.now();
+      if (!res.logged_in) { live.on = false; toast('Your Kite session has ended. Log in to Kite again for live prices.'); }
+      renderKiteBtn();
+      if (n) render();
+    } catch (e) {
+      live.status = { ...(live.status || {}), error: e.message };
+      renderKiteBtn();
+    }
+    if (live.on) live.timer = setTimeout(pollLive, 2000);
+  }
+
+  async function kiteInit() {
+    if (STATIC.on) return;
+    try { live.status = await api('/api/kite/status'); } catch (e) { return; }
+    renderKiteBtn();
+    const p = new URLSearchParams(location.search).get('kite');
+    if (p) {
+      toast({ connected: 'Kite connected: prices are now live.', failed: 'Kite login failed. Check your API key and secret, then try again.',
+        cancelled: 'Kite login was cancelled.', setup: 'Add your Kite API key and secret first.' }[p] || '');
+      history.replaceState(null, '', location.pathname);
+      if (p === 'setup') openKiteDialog();
+    }
+    if (live.status.logged_in && live.status.available) { live.on = true; live.version = -1; pollLive(); }
+  }
+
+  const kiteDialog = $('#kiteDialog');
+  function openKiteDialog(forceSetup = false) {
+    const s = live.status || {};
+    const info = s.logged_in && !forceSetup;
+    $('#kiteSetup').hidden = info;
+    $('#kiteInfo').hidden = !info;
+    $('#kiteMsg').textContent = s.available === false ? 'Live streaming needs the websocket-client package: run  .venv/bin/python -m pip install -r requirements.txt' : '';
+    if (info) {
+      $('#kiteInfoText').textContent = `Logged in to Kite as ${s.user}. Prices and signals update live every 2 seconds `
+        + `until the session ends at ${new Date(s.expires).toLocaleString('en-IN', { weekday: 'short', hour: 'numeric', minute: '2-digit' })} (Kite asks for a fresh login each day).`
+        + (s.error ? ` Last message from Kite: ${s.error}` : '');
+    }
+    kiteDialog.showModal();
+  }
+
+  $('#kiteBtn').addEventListener('click', () => {
+    const s = live.status || {};
+    if (s.configured && !s.logged_in) { location.href = 'kite/login'; return; }
+    openKiteDialog();
+  });
+  kiteDialog.addEventListener('click', (e) => { if (e.target.closest('[data-close]')) kiteDialog.close(); });
+  $('#kiteChangeKeys').addEventListener('click', () => openKiteDialog(true));
+  $('#kiteSetup').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    $('#kiteMsg').textContent = '';
+    try {
+      const res = await api('/api/kite/config', { method: 'POST', body: JSON.stringify({ api_key: $('#kiteKey').value, api_secret: $('#kiteSecret').value }) });
+      $('#kiteSecret').value = '';
+      location.href = res.login_url.replace(/^\//, '');
+    } catch (err) {
+      $('#kiteMsg').textContent = err.message;
+    }
+  });
+  $('#kiteLogout').addEventListener('click', async () => {
+    try { await api('/api/kite/logout', { method: 'POST' }); } catch (e) { /* already logged out */ }
+    live.on = false;
+    live.quotes = {};
+    live.lastUpdate = null;
+    live.status = await api('/api/kite/status').catch(() => live.status);
+    kiteDialog.close();
+    renderKiteBtn();
+    render();
+    toast('Logged out of Kite. Prices are back to the regular data feed.');
+  });
 
   // ------------------------------------------------------------ breakout watch
   const WATCH_ALL = ['15m', '1h', '1d', '1wk'];
@@ -899,7 +1048,9 @@
     for (const it of items) {
       const hits = [];
       for (const tf of state.watchTfs) {
-        const setup = rangeSetup(watch.data[tf] && watch.data[tf][it.r.symbol], R);
+        const raw = watch.data[tf] && watch.data[tf][it.r.symbol];
+        const q = live.on && live.quotes[it.r.symbol];
+        const setup = rangeSetup(q && raw ? patchCandles(raw, q.ltp) : raw, R);
         if (setup) hits.push({ tf, ...setup });
       }
       for (const [dir, list] of [[1, up], [-1, down]]) {
@@ -1264,6 +1415,7 @@
     state.universe = uid;
     universeSel.value = uid;
     store.set('index', state.universe);
+    live.version = -1;
     fitCapToIndex();
     store.set('filters', state.filters);
     state.stocks.clear();
@@ -1350,6 +1502,7 @@
     tfSel.value = state.tf;
     startScan(false);
     restoreLookups();
+    kiteInit();
   }
   init();
 })();
