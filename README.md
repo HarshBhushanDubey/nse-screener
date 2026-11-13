@@ -63,16 +63,18 @@ The **FII & DII Buying** button at the top right opens Moneycontrol's
 [DII & FII Buying scan](https://www.moneycontrol.com/stock-scanner/fundamental/mc-curated-scans/dii-buying-fii-buying/CID1-SID176/)
 in a new tab.
 
-## Online version (works when your Mac is off)
+## Online version (free, works when your Mac is off)
 
-The site is set up for [Render](https://render.com)'s free plan via `render.yaml`:
-**https://nse-screener.onrender.com**
+**https://harshbhushandubey.github.io/nse-screener/**
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/HarshBhushanDubey/nse-screener)
+Hosted free on GitHub Pages. A GitHub Actions workflow (`.github/workflows/site.yml`) runs
+`build_site.py` every 15 minutes from 08:30 to 16:15 IST on weekdays and once each evening: it downloads
+fresh prices, candles for every timeframe and fundamentals for all Nifty 500 stocks, writes them as JSON
+files and publishes the site. The page reads those files, so no server is needed. Search covers the
+Nifty 500. To rebuild immediately: GitHub → Actions → *Update data and publish site* → *Run workflow*.
 
-Every push to the `main` branch on GitHub redeploys it automatically. On the free plan the site sleeps
-after 15 minutes without visitors; the next visit wakes it in about a minute, then the first scan takes
-another ~30 seconds.
+GitHub may delay scheduled runs by a few minutes, and pauses schedules in repositories with no commits
+for 60 days (re-enable them from the Actions tab).
 
 To share straight from your Mac instead, run `./share.sh` (needs `brew install cloudflared` once); that
 link works only while the Mac is on and changes each time.
@@ -83,7 +85,8 @@ link works only while the Mac is on and changes each time.
 - `screener.py` pulls 2 years of daily prices and key ratios from Yahoo Finance (`yfinance`),
   computes SMA 50/200, golden/death-cross age, Wilder RSI(14), 52-week high/low and volume spike,
   and the last 60 candles + pivot levels for the chosen timeframe.
-- `app.py` is the Flask API; `static/app.js` applies the strategy rules in the browser.
+- `app.py` is the Flask API for running locally; `build_site.py` builds the static online version.
+- `static/app.js` applies the strategy rules in the browser and works with either.
 
 Data comes from Yahoo Finance's free feed and can be delayed or incomplete (some ratios,
 like D/E for banks, are often missing). Signals are simple rule-based scores for learning and screening, not investment advice.

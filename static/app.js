@@ -38,6 +38,95 @@
     return body;
   }
 
+  // ------------------------------------------------------------ static mode (GitHub Pages)
+  // When data/meta.json exists the site runs without a server: build_site.py pre-computes
+  // every stock's metrics on a schedule and the browser reads those files.
+  const STATIC = { on: false, meta: null, stocks: null, tf: {} };
+
+  async function getJSON(url) {
+    const res = await fetch(url, { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`Couldn’t load ${url.split('?')[0]} (${res.status})`);
+    return res.json();
+  }
+
+  async function detectStatic() {
+    try {
+      const res = await fetch('data/meta.json', { cache: 'no-cache' });
+      if (!res.ok) return false;
+      STATIC.meta = await res.json();
+      STATIC.on = true;
+    } catch (e) { /* no static data: use the Flask API */ }
+    return STATIC.on;
+  }
+
+  async function staticLoad(force) {
+    if (force) {
+      STATIC.meta = await getJSON(`data/meta.json?t=${Date.now()}`);
+      STATIC.stocks = null;
+      STATIC.tf = {};
+    }
+    const v = `?v=${encodeURIComponent(STATIC.meta.updated)}`;
+    if (!STATIC.stocks) STATIC.stocks = await getJSON(`data/stocks.json${v}`);
+    if (state.tf !== '1d' && !STATIC.tf[state.tf]) STATIC.tf[state.tf] = await getJSON(`data/tf-${state.tf}.json${v}`);
+  }
+
+  function staticRecord(sym) {
+    const r = STATIC.stocks && STATIC.stocks[sym];
+    if (!r) return null;
+    const t = state.tf === '1d' ? r.tfd : (STATIC.tf[state.tf] || {})[sym];
+    return { ...r, tf: state.tf, tfd: t || null, tf_status: t ? 'ok' : 'error' };
+  }
+
+  async function staticScan(token, force) {
+    const label = universeLabel();
+    state.scan = { state: 'running', label, phase: 'Loading data' };
+    render();
+    try {
+      await staticLoad(force);
+      if (token !== state.pollToken) return;
+      const uni = STATIC.meta.universes.find((u) => u.id === state.universe) || STATIC.meta.universes[0];
+      state.stocks = new Map();
+      for (const sym of uni.symbols) {
+        const rec = staticRecord(sym);
+        if (rec) state.stocks.set(rec.ysym, rec);
+      }
+      state.scan = { state: 'done', label: uni.label, count: state.stocks.size, finished: STATIC.meta.updated };
+    } catch (e) {
+      state.scan = { state: 'error', error: e.message, label };
+    }
+    render();
+  }
+
+  function staticSuggest(query, limit = 8) {
+    const q = query.trim().toLowerCase();
+    if (!q || !STATIC.stocks) return [];
+    const scored = [];
+    for (const r of Object.values(STATIC.stocks)) {
+      const sym = r.symbol.toLowerCase(), name = (r.name || '').toLowerCase();
+      let score;
+      if (sym === q) score = 0;
+      else if (sym.startsWith(q)) score = 1;
+      else if (name.split(/\s+/).some((w) => w.startsWith(q))) score = 2;
+      else if (name.includes(q) || sym.includes(q)) score = 3;
+      else continue;
+      scored.push([score, sym.length, r]);
+    }
+    scored.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    return scored.slice(0, limit).map(([, , r]) => ({ symbol: r.symbol, name: r.name, industry: r.industry }));
+  }
+
+  async function staticLookup(q) {
+    await staticLoad(false);
+    const key = q.trim().toUpperCase().replace(/\.(NS|BO)$/, '');
+    const sym = STATIC.stocks[key] ? key : (staticSuggest(q)[0] || {}).symbol;
+    const rec = sym && staticRecord(sym);
+    if (!rec) throw new Error(`“${q}” isn’t in the Nifty 500, which the online version covers.`);
+    return rec;
+  }
+
+  const lookupRecord = (q) => (STATIC.on ? staticLookup(q)
+    : api(`/api/lookup?q=${encodeURIComponent(q)}&tf=${encodeURIComponent(state.tf)}`));
+
   // ------------------------------------------------------------ strategies
   const STRATEGIES = [
     {
@@ -699,10 +788,12 @@
       const recs = [...state.stocks.values()];
       const asOf = recs.map((r) => r.as_of).filter(Boolean).sort().pop();
       const missing = recs.filter((r) => r.error).length;
-      const time = s.finished ? new Date(s.finished).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' }) : '';
+      const time = s.finished ? new Date(s.finished).toLocaleString('en-IN', STATIC.on
+        ? { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' } : { hour: 'numeric', minute: '2-digit' }) : '';
       el.textContent = `${s.label}: ${s.count} stocks, updated ${time}`
         + (asOf ? ` (latest session ${fmtDate(asOf)})` : '')
-        + (missing ? `. ${missing} without price data.` : '.');
+        + (missing ? `. ${missing} without price data.` : '.')
+        + (STATIC.on ? ' Data refreshes about every 15 minutes during market hours.' : '');
     }
   }
 
@@ -710,6 +801,7 @@
   async function startScan(force = false) {
     clearTimeout(state.pollTimer);
     const token = ++state.pollToken;
+    if (STATIC.on) return staticScan(token, force);
     try {
       const meta = await api('/api/scan', { method: 'POST', body: JSON.stringify({ universe: state.universe, tf: state.tf, force }) });
       if (token !== state.pollToken) return;
@@ -782,7 +874,7 @@
   async function fetchSuggestions(q) {
     const seq = ++suggestSeq;
     try {
-      const res = await api(`/api/suggest?q=${encodeURIComponent(q)}`);
+      const res = STATIC.on ? staticSuggest(q) : await api(`/api/suggest?q=${encodeURIComponent(q)}`);
       if (seq !== suggestSeq || search.value.trim() !== q) return;
       suggestions = res;
       active = -1;
@@ -806,7 +898,7 @@
   async function lookup(q) {
     openList(`<li class="msg" aria-disabled="true">Looking up “${esc(q)}” on NSE…</li>`);
     try {
-      const rec = await api(`/api/lookup?q=${encodeURIComponent(q)}&tf=${encodeURIComponent(state.tf)}`);
+      const rec = await lookupRecord(q);
       closeList();
       if (state.stocks.has(rec.ysym)) {
         search.value = rec.symbol;
@@ -831,7 +923,7 @@
   async function restoreLookups() {
     for (const ysym of store.get('lookups', [])) {
       try {
-        const rec = await api(`/api/lookup?q=${encodeURIComponent(ysym)}&tf=${encodeURIComponent(state.tf)}`);
+        const rec = await lookupRecord(ysym);
         state.lookups.set(rec.ysym, rec);
         render();
       } catch (e) { /* dropped silently; it will not be saved again */ }
@@ -1103,7 +1195,12 @@
     renderRulesForm();
     render();
     try {
-      [state.universes, state.timeframes] = await Promise.all([api('/api/universes'), api('/api/timeframes')]);
+      if (await detectStatic()) {
+        state.universes = STATIC.meta.universes.map(({ id, label }) => ({ id, label }));
+        state.timeframes = STATIC.meta.timeframes;
+      } else {
+        [state.universes, state.timeframes] = await Promise.all([api('/api/universes'), api('/api/timeframes')]);
+      }
     } catch (e) {
       state.scan = { state: 'error', error: e.message, label: 'index list' };
       render();
